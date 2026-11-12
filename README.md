@@ -1,0 +1,1 @@
+# binance-smart-trade-manager-v7
