@@ -1,1 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Binance Smart Trade Manager V7</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b1020;color:#e8edf7;font:14px Arial,sans-serif}
+header{padding:18px;background:#121a2d;border-bottom:1px solid #29334a}
+h1{font-size:20px;margin:0 0 7px;color:#f0b90b}small,.muted{color:#9aa8bd}
+main{padding:14px;max-width:1100px;margin:auto}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin:12px 0}
+.stat,.panel,.signal{background:#141e32;border:1px solid #293751;border-radius:12px;padding:13px}
+.stat b{display:block;font-size:21px;margin-top:6px}
+button{background:#f0b90b;color:#101522;border:0;padding:12px 17px;border-radius:8px;font-weight:bold}
+button:disabled{opacity:.5}
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}
+select{background:#1b2941;color:white;padding:10px;border:1px solid #40516e;border-radius:8px}
+#status{margin:12px 0;color:#b8c7dc}
+.signal{margin:10px 0;border-left:4px solid #28c78a}
+.signal.short{border-left-color:#ff6375}
+.signal h3{margin:0 0 8px;font-size:18px}
+.green{color:#35d69a}.red{color:#ff7182}.gold{color:#f0b90b}
+.details{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.details div{background:#0d1729;padding:9px;border-radius:7px}
+.details b{display:block;margin-top:5px;overflow-wrap:anywhere}
+.note{line-height:1.5;background:#111b2e;padding:12px;border-radius:9px;margin-top:15px}
+footer{padding:18px;color:#8291a8;text-align:center}
+@media(max-width:520px){.stats{grid-template-columns:repeat(3,1fr)}.stat{padding:9px}.stat b{font-size:17px}.details{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<header>
+<h1>₿ SMART TRADE MANAGER V7</h1>
+<small>Binance USD-M Futures · Signals only · No automatic trading</small>
+</header>
+<main>
+<div class="stats">
+<div class="stat">Balance<b>100 USDT</b></div>
+<div class="stat">Leverage<b>10x</b></div>
+<div class="stat">Risk / trade<b>1 USDT</b></div>
+</div>
+<div class="controls">
+<button id="scanBtn" onclick="startScan()">▶ Scan Market</button>
+<select id="universe">
+<option value="30">Top 30 contracts</option>
+<option value="50">Top 50 contracts</option>
+<option value="100">Top 100 contracts</option>
+</select>
+<span class="muted" id="last">Not scanned yet</span>
+</div>
+<div id="status">Press Scan Market to begin.</div>
+<div class="panel">
+<b>Signal filter: 80/100 minimum</b>
+<p class="muted">Entry: 15m · Confirmation: 1h and 4h · Targets: 15m, 30m and 1h ATR</p>
+</div>
+<h2>Qualified signals</h2>
+<div id="signals"><p class="muted">No scan performed yet.</p></div>
+<div class="note">
+<b class="gold">Risk notice</b><br>
+Signals are technical estimates, not guaranteed predictions or verified win probabilities. Always check the chart yourself. This website does not connect to your Binance account and never places orders. A static browser scan depends on your internet connection and Binance API availability.
+</div>
+</main>
+<footer>V7 · Public market data · Keep this page open while scanning</footer>
+<script>
+const API="https://fapi.binance.com";
+const $=id=>document.getElementById(id);
+let busy=false;
 
+async function get(path){
+ const r=await fetch(API+path);
+ if(!r.ok) throw Error("Binance API error "+r.status);
+ return r.json();
+}
+function ema(a,n){
+ let k=2/(n+1),v=a[0];
+ for(let i=1;i<a.length;i++)v=a[i]*k+v*(1-k);
+ return v;
+}
+function rsi(a,n=14){
+ let g=0,l=0;
+ for(let i=a.length-n;i<a.length;i++){
+  let d=a[i]-a[i-1];if(d>0)g+=d;else l-=d;
+ }
+ if(l===0)return 100;
+ return 100-100/(1+(g/n)/(l/n));
+}
+function atr(k,n=14){
+ let s=0;
+ for(let i=k.length-n;i<k.length;i++){
+  let h=+k[i][2],lo=+k[i][3],pc=+k[i-1][4];
+  s+=Math.max(h-lo,Math.abs(h-pc),Math.abs(lo-pc));
+ }
+ return s/n;
+}
+function macd(a){
+ let fast=[],slow=[];
+ for(let i=0;i<a.length;i++){
+  fast.push(ema(a.slice(0,i+1),12));
+  slow.push(ema(a.slice(0,i+1),26));
+ }
+ let line=fast.map((v,i)=>v-slow[i]);
+ return line[line.length-1]-ema(line.slice(-35),9);
+}
+function trend(k){
+ let c=k.map(x=>+x[4]);
+ let e20=ema(c.slice(-100),20),e50=ema(c.slice(-120),50);
+ return c[c.length-1]>e20&&e20>e50?1:
+        c[c.length-1]<e20&&e20<e50?-1:0;
+}
+async function analyse(symbol){
+ const intervals=["15m","30m","1h","4h"];
+ const results=await Promise.all(intervals.map(i=>
+  get(`/fapi/v1/klines?symbol=${symbol}&interval=${i}&limit=120`)
+ ));
+ const [k15,k30,k1,k4]=results;
+ if(results.some(k=>!Array.isArray(k)||k.length<60))return null;
+ const c=k15.map(x=>+x[4]),price=c.at(-1);
+ const t15=trend(k15),t1=trend(k1),t4=trend(k4);
+ if(!t15||t15!==t1||t1!==t4)return null;
+ const direction=t15===1?"LONG":"SHORT",sign=t15;
+ const rv=rsi(c),m=macd(c),a15=atr(k15),a30=atr(k30),a1=atr(k1);
+ const lastVol=+k15.at(-1)[5];
+ const avgVol=k15.slice(-21,-1).reduce((s,x)=>s+(+x[5]),0)/20;
+ const volumeRatio=avgVol?lastVol/avgVol:0;
+ const e9=ema(c.slice(-80),9),e21=ema(c.slice(-100),21);
+ let score=60,reasons=[];
+ score+=12;reasons.push("15m, 1h and 4h trend aligned");
+ if((sign===1&&e9>e21)||(sign===-1&&e9<e21)){score+=8;reasons.push("EMA alignment")}
+ if((sign===1&&rv>=52&&rv<=70)||(sign===-1&&rv>=30&&rv<=48)){score+=7;reasons.push("RSI momentum")}
+ if(m*sign>0){score+=6;reasons.push("MACD momentum")}
+ if(volumeRatio>=1.2){score+=7;reasons.push("Volume expansion")}
+ score=Math.min(100,score);
+ if(score<80)return null;
+ const entry=price;
+ const sl=entry-sign*a15*1.5;
+ const tp1=entry+sign*a15;
+ const tp2=entry+sign*a30*1.5;
+ const tp3=entry+sign*a1*2;
+ const risk=Math.abs(entry-sl);
+ return {symbol,direction,score,entry,sl,tp1,tp2,tp3,
+  rr:(Math.abs(tp3-entry)/risk).toFixed(2),rv,volumeRatio,reasons};
+}
+function fmt(n){return Number(n).toPrecision(7)}
+function card(s){
+ return `<article class="signal ${s.direction==="SHORT"?"short":""}">
+ <h3>${s.symbol} <span class="${s.direction==="LONG"?"green":"red"}">${s.direction}</span></h3>
+ <span class="gold">Quality score: ${s.score}/100</span>
+ <div class="details">
+ <div>Entry<b>${fmt(s.entry)}</b></div>
+ <div>Stop loss<b class="red">${fmt(s.sl)}</b></div>
+ <div>Take profit 1<b class="green">${fmt(s.tp1)}</b></div>
+ <div>Take profit 2<b class="green">${fmt(s.tp2)}</b></div>
+ <div>Take profit 3<b class="green">${fmt(s.tp3)}</b></div>
+ <div>Risk / reward<b>${s.rr}:1</b></div>
+ <div>RSI<b>${s.rv.toFixed(1)}</b></div>
+ <div>Volume ratio<b>${s.volumeRatio.toFixed(2)}x</b></div>
+ </div>
+ <p class="muted">${s.reasons.join(" · ")}</p>
+ </article>`;
+}
+async function startScan(){
+ if(busy)return;
+ busy=true;$("scanBtn").disabled=true;
+ $("signals").innerHTML="";
+ let found=[],done=0,errors=0;
+ try{
+  $("status").textContent="Loading active USDT perpetual contracts…";
+  const info=await get("/fapi/v1/exchangeInfo");
+  const tickers=await get("/fapi/v1/ticker/24hr");
+  const active=new Set(info.symbols.filter(s=>
+   s.status==="TRADING"&&s.contractType==="PERPETUAL"&&s.quoteAsset==="USDT"
+  ).map(s=>s.symbol));
+  const top=tickers.filter(t=>active.has(t.symbol))
+   .sort((a,b)=>+b.quoteVolume-(+a.quoteVolume))
+   .slice(0,+$("universe").value);
+  $("status").textContent=`Scanning ${top.length} high-volume contracts. Please keep this page open…`;
+  for(let i=0;i<top.length;i+=3){
+   const batch=top.slice(i,i+3);
+   const results=await Promise.all(batch.map(async t=>{
+    try{return await analyse(t.symbol)}catch(e){errors++;return null}
+   }));
+   found.push(...results.filter(Boolean));done+=batch.length;
+   $("status").textContent=`Scanned ${done}/${top.length} · Qualified signals: ${found.length} · API errors: ${errors}`;
+   $("signals").innerHTML=found.sort((a,b)=>b.score-a.score).map(card).join("")||
+    `<p class="muted">No qualified signals found so far. Waiting for scan to finish…</p>`;
+  }
+  $("signals").innerHTML=found.sort((a,b)=>b.score-a.score).map(card).join("")||
+   `<p class="muted">No signals met the 80/100 filter. No trade is better than a weak setup.</p>`;
+  $("last").textContent="Updated "+new Date().toLocaleTimeString();
+  $("status").textContent=`Scan complete: ${done} contracts checked, ${found.length} qualified signals, ${errors} API errors.`;
+ }catch(e){
+  $("status").textContent="Scan failed: "+e.message+". Check internet access and try again.";
+ }finally{
+  busy=false;$("scanBtn").disabled=false;
+ }
+}
+</script>
+</body>
+</html>
